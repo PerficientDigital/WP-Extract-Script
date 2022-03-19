@@ -1,10 +1,8 @@
 #!/usr/bin/env groovy
 
-import groovy.io.FileType
-import groovy.time.TimeCategory 
+import groovy.time.TimeCategory
 import groovy.transform.Field
-import groovy.util.XmlSlurper
-import groovy.xml.MarkupBuilder
+import groovy.xml.XmlSlurper
 import groovy.xml.XmlUtil
 
 import java.text.SimpleDateFormat
@@ -43,6 +41,10 @@ def replacements = null
 def pageCsv = null
 @Field
 def targetDir = null
+@Field
+def filterXml = null
+@Field
+def replacementCfgFile = null
 
 def start = new Date()
 if(args.length < 2) {
@@ -55,7 +57,7 @@ targetDir = new File(args[1]);
 batch = System.console().readLine("Batch ID (Wordpress): ") ?: "Wordpress"
 contentRoot = System.console().readLine("Content Root (Required): ")
 assert contentRoot
-dateFormat = System.console().readLine("Path Date Format (ex: yyyy/MM/): ")
+dateFormat = System.console().readLine("Post Date Format (ex: yyyy/MM/): ")
 assetsRoot = System.console().readLine("Assets Root (Required): ")
 assert assetsRoot
 domain = System.console().readLine("Domain Name (Required): ")
@@ -82,9 +84,54 @@ replacements = new CSVWriter(new OutputStreamWriter(new FileOutputStream(new Fil
 replacements.writeNext(['Status','Source','Target'] as String[])
 pageCsv = new CSVWriter(new OutputStreamWriter(new FileOutputStream(new File("${batch}/page-mappings.csv", targetDir)),ENCODING))
 pageCsv.writeNext(['Status','Source Path','New Url','New Path','Template','Legacy Url','Redirects','Subnav Root?','Page Title','Page Description','Batch'] as String[])
+filterXml = new File("${batch}/filter.xml", targetDir)
+updateFilterXml()
+replacementCfgFile = new File("${batch}/replacement-config.json", targetDir)
+updateReplacementCfgFile()
 
 println "Parsing ${args[0]}..."
 def inXml = new XmlSlurper(false,true).parseText(new File(args[0]).getText(ENCODING))
+
+void updateFilterXml() {
+    def filterCfg = '''<?xml version="1.0" encoding="UTF-8"?>
+<workspaceFilter version="1.0">
+    <filter root="${{contentRootPath}}">
+        <exclude pattern="${{contentRootPath}}/jcr:content" />
+    </filter>
+    <filter root="${{contentDamRoot}}"/>
+</workspaceFilter>
+'''
+    filterCfg = filterCfg.replace('${{contentRootPath}}', contentRoot)
+    filterCfg = filterCfg.replace('${{contentDamRoot}}', assetsRoot)
+    filterXml.write(filterCfg)
+}
+
+
+void updateReplacementCfgFile() {
+    def replacementCfg = '''{
+\t"replacements.csv": [{
+\t\t"mode": "mapping",
+\t\t"sourceKey": "Source",
+\t\t"targetKey": "Target"
+\t}],
+\t"page-mappings.csv": [
+\t\t{
+\t\t\t"mode": "mapping",
+\t\t\t"sourceKey": "Legacy Url",
+\t\t\t"targetKey": "New Url"
+\t\t},
+\t\t{
+\t\t\t"mode": "mapping",
+\t\t\t"sourceKey": "Source Path",
+\t\t\t"targetKey": "New Url"
+\t\t}
+\t]
+
+}
+'''
+
+    replacementCfgFile.write(replacementCfg)
+}
 
 void downloadFile(String url, String localPath) {
     def file = new File("work/source/${localPath}", targetDir)
@@ -129,7 +176,8 @@ void handleAttachment(Object item){
     fileMappings.flush()
     
     println "Adding entry to replacements.csv for ${item.post_id}"
-    replacements.writeNext(['Migrate','wordpress-image-'+item.post_id,newPath] as String[])
+    replacements.writeNext(['Migrate','wp-image-'+item.post_id,newPath] as String[])
+    replacements.writeNext(['Migrate',item.attachment_url.text(),newPath] as String[])
     replacements.flush()
     
 }
@@ -145,8 +193,8 @@ void handlePost(Object item) {
     def itemFile = new File("work/source/${item.post_name}.xml", targetDir)
     itemFile.getParentFile().mkdirs()
     println "Saving item to: ${itemFile}..."
-    
-    XmlUtil xmlUtil = new XmlUtil()  
+
+    XmlUtil xmlUtil = new XmlUtil()
     xmlUtil.serialize(item, new FileWriter(itemFile))
     
     println "Adding line to page mappings for: ${item.post_name}.xml"
@@ -166,7 +214,7 @@ inXml.channel.item.each{ item ->
     if('attachment'.equals(item.post_type.text())) {
         handleAttachment(item)
         attachments++
-    } else if ('post'.equals(item.post_type.text())) {
+    } else if ('post'.equals(item.post_type.text()) || 'page'.equals(item.post_type.text())) {
         handlePost(item)
         posts++
     } else {
